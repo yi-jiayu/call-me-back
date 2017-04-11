@@ -28,13 +28,13 @@ type callback struct {
 }
 
 type callbackStatus struct {
-	RequestId     int `json:"request_id"`
+	RequestId     int    `json:"request_id"`
 	CallbackInfo  string `json:"callback_info"`
-	TimeRemaining int `json:"time_remaining"`
+	TimeRemaining int    `json:"time_remaining"`
 }
 
 func newCallback(w http.ResponseWriter, r *http.Request) {
-	requestId := atomic.AddUint64(&requestCount, 1)
+	id := atomic.AddUint64(&requestCount, 1)
 
 	method := r.Method
 
@@ -68,9 +68,6 @@ func newCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if d < 1000 {
-		d = 1000
-	}
 	delay := time.Duration(d) * time.Second
 
 	req, err := http.NewRequest(method, url, bytes.NewReader(payload))
@@ -82,7 +79,7 @@ func newCallback(w http.ResponseWriter, r *http.Request) {
 	delete(req.Header, "Callback-Url")
 	delete(req.Header, "Callback-Delay")
 
-	log.Printf("Will respond to %s in %d s.\n", url, d)
+	log.Printf("Callback %d: %s %s in %d s.\n", id, method, url, d)
 
 	timer := time.AfterFunc(time.Duration(d)*time.Second, func() {
 		_, err = http.DefaultClient.Do(req)
@@ -92,8 +89,8 @@ func newCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("Responded to %s in %d s.\n", url, d)
-		delete(callbacks, requestId)
+		log.Printf("Callback %d: %s %s executed after %d s.\n", id, method, url, d)
+		delete(callbacks, id)
 	})
 
 	callback := callback{
@@ -102,11 +99,11 @@ func newCallback(w http.ResponseWriter, r *http.Request) {
 		method: method,
 		url:    url,
 	}
-	callbacks[requestId] = callback
+	callbacks[id] = callback
 
 	info := fmt.Sprintf("%s %s", method, url)
 	status := callbackStatus{
-		RequestId:     int(requestId),
+		RequestId:     int(id),
 		CallbackInfo:  info,
 		TimeRemaining: d,
 	}
@@ -124,7 +121,7 @@ func newCallback(w http.ResponseWriter, r *http.Request) {
 	w.Write(js)
 }
 
-func getCallbackStatus(w http.ResponseWriter, r *http.Request) {
+func callbacksGet(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(r.URL.Path, "/")
 	c := parts[2]
 
@@ -143,7 +140,7 @@ func getCallbackStatus(w http.ResponseWriter, r *http.Request) {
 
 	if callback, exists := callbacks[uint64(id)]; exists {
 		r := callback.end.Sub(time.Now())
-		remaining := int(r/time.Second)
+		remaining := int(r / time.Second)
 
 		info := fmt.Sprintf("%s %s", callback.method, callback.url)
 
@@ -168,9 +165,46 @@ func getCallbackStatus(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func callbacksDelete(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(r.URL.Path, "/")
+	c := parts[2]
+
+	if c == "" {
+		w.WriteHeader(http.StatusNotFound)
+
+		return
+	}
+
+	id, err := strconv.Atoi(c)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+
+		return
+	}
+
+	if callback, exists := callbacks[uint64(id)]; exists {
+		callback.timer.Stop()
+		delete(callbacks, uint64(id))
+
+		log.Printf("Callback %d: %s %s deleted.\n", id, callback.method, callback.url)
+
+		w.WriteHeader(http.StatusNoContent)
+	} else {
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func callbacksHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		callbacksGet(w, r)
+	} else if r.Method == http.MethodDelete {
+		callbacksDelete(w, r)
+	}
+}
+
 func main() {
 	http.HandleFunc("/new", newCallback)
-	http.HandleFunc("/status/", getCallbackStatus)
+	http.HandleFunc("/callbacks/", callbacksHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
